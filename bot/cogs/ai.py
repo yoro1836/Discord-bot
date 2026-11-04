@@ -33,10 +33,13 @@ async def system_prompt(user_id: int, user_name: str, owner: bool) -> str:
         "Reply in the user's language, concisely, using Discord markdown. "
         "Use tools when they help: web search for anything recent or factual, fetch_url for links, "
         "get_weather, convert_currency, reminders. Cite sources briefly when you searched.\n"
-        "You have long-term memory below; use it naturally. A background process updates memory after "
-        "conversations, so only call memory tools when explicitly asked (remember this / forget that / "
-        "that's wrong): remember_user" + (" or remember_main" if owner else "")
-        + ", update_memory, forget_memory. "
+        "You have long-term memory below and you maintain it yourself, without being asked. "
+        "Whenever you learn something lasting (preferences, background, relationships, ongoing plans, "
+        "how they like answers), save it with remember_user"
+        + (" (general context useful in every chat: remember_main)" if owner else "")
+        + ". If it changes an existing note, update_memory that [id] instead of adding a duplicate; "
+        "merge duplicates and forget_memory notes that turn out wrong or obsolete. "
+        "Do this alongside your answer, not instead of it. "
         "Don't announce routine saves. Never save secrets like passwords or tokens. "
         "Guests never see the owner's personal memories; don't reveal private details about the owner to them.\n\n"
         + await memory.context(user_id, user_name, owner)

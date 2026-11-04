@@ -9,7 +9,7 @@ from . import aitools, config, memory
 from .chatgpt import ChatGPT
 
 log = logging.getLogger(__name__)
-ENABLED = os.environ.get("AI_MEMORY_AUTO", "1") == "1"
+ENABLED = os.environ.get("AI_MEMORY_AUTO", "0") == "1"  # 기본은 대화 중 GPT가 직접 관리
 IDLE_SECONDS = int(os.environ.get("AI_MEMORY_IDLE", 90))  # 마지막 대화 후 이만큼 조용하면 정리
 MAX_BUFFER = 8  # 이만큼 쌓이면 바로 정리
 TOOLS = ("remember_user", "remember_main", "update_memory", "forget_memory")
