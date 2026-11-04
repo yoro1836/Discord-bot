@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
-from . import sysinfo, webtext
+from . import memory, sysinfo, webtext
 from .cogs import reminders
 
 TZ = ZoneInfo("Asia/Seoul")
@@ -36,10 +36,20 @@ PUBLIC = [
     fn("convert_currency", "Convert money using today's exchange rate.",
        {"amount": {"type": "number"}, "src": {"type": "string", "description": "ISO code, e.g. USD"},
         "dst": {"type": "string", "description": "ISO code, e.g. KRW"}}),
+    fn("remember_user", "Save a lasting fact about the person you're talking to (preferences, background, how they like "
+       "answers). Keep it short; one fact per call. Don't save trivia or one-off details.",
+       {"note": {"type": "string"}}),
+    fn("update_memory", "Rewrite an existing memory by its [id] (e.g. when a fact changed).",
+       {"id": {"type": "integer"}, "note": {"type": "string"}}),
+    fn("forget_memory", "Delete a memory by its [id] (when asked to forget, or it's wrong).",
+       {"id": {"type": "integer"}}),
     fn("fetch_url", "Read a web page's text or a YouTube video's transcript. If it fails, use web search instead.",
        {"url": {"type": "string"}}),
 ]
 OWNER_ONLY = [
+    fn("remember_main", "Save a lasting fact to the shared main memory: general context useful in every "
+       "conversation, including with guests (e.g. the owner's projects, server, group in-jokes). "
+       "Put the owner's private details in remember_user instead.", {"note": {"type": "string"}}),
     fn("set_reminder", "Schedule a Discord DM reminder for the owner.",
        {"due": {"type": "string", "description": "ISO 8601 datetime with offset, e.g. 2026-11-04T18:00:00+09:00"},
         "text": {"type": "string"}}),
@@ -54,6 +64,8 @@ def specs(owner: bool) -> list[dict]:
 
 
 LABELS = {
+    "remember_user": "🧠 기억하는 중", "remember_main": "🧠 기억하는 중", "update_memory": "🧠 기억 고치는 중",
+    "forget_memory": "🧠 잊는 중",
     "get_weather": "🌤️ 날씨 확인", "convert_currency": "💱 환율 확인", "fetch_url": "🔗 링크 읽는 중",
     "set_reminder": "⏰ 리마인더 설정", "list_reminders": "⏰ 리마인더 확인", "delete_reminder": "⏰ 리마인더 삭제",
     "server_status": "🖥️ 서버 상태 확인",
@@ -113,10 +125,20 @@ async def fetch_url(s, url: str) -> dict:
         return {"error": f"{type(e).__name__}: {e}"[:300]}
 
 
-async def run(s: aiohttp.ClientSession, name: str, args_json: str, user_id: int, owner: bool) -> str:
+async def run(
+    s: aiohttp.ClientSession, name: str, args_json: str, user_id: int, owner: bool, user_name: str = ""
+) -> str:
+    # 주인은 모든 기억을, 손님은 자기 기억만 고치거나 지울 수 있음
+    scopes = None if owner else [memory.user_scope(user_id)]
     try:
         a = json.loads(args_json or "{}")
-        if name == "get_weather":
+        if name == "remember_user":
+            out = {"id": await memory.add(memory.user_scope(user_id), a["note"], user_name)}
+        elif name == "update_memory":
+            out = {"updated": await memory.update(int(a["id"]), a["note"], scopes)}
+        elif name == "forget_memory":
+            out = {"deleted": await memory.delete(int(a["id"]), scopes)}
+        elif name == "get_weather":
             out = await get_weather(s, a["location"])
         elif name == "convert_currency":
             out = await convert_currency(s, float(a["amount"]), a["src"], a["dst"])
@@ -124,6 +146,8 @@ async def run(s: aiohttp.ClientSession, name: str, args_json: str, user_id: int,
             out = await fetch_url(s, a["url"])
         elif not owner:
             out = {"error": "not allowed"}
+        elif name == "remember_main":
+            out = {"id": await memory.add("main", a["note"], user_name)}
         elif name == "set_reminder":
             due = datetime.fromisoformat(a["due"])
             if due.tzinfo is None:

@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import aitools, config
+from .. import aitools, config, memory
 from ..chatgpt import AuthError, ChatGPT
 
 DB = config.DATA_DIR / "bot.db"
@@ -23,16 +23,23 @@ GUEST_LIMIT, GUEST_WINDOW = (int(x) for x in os.environ.get("AI_GUEST_LIMIT", "5
 _guest_uses: dict[int, list[float]] = {}
 
 
-def system_prompt(owner: bool) -> str:
+async def system_prompt(user_id: int, user_name: str, owner: bool) -> str:
     now = datetime.now(aitools.TZ).strftime("%Y-%m-%d %H:%M (%A) KST")
-    who = "the bot's owner" if owner else "a guest (not the owner; reminders and server tools are unavailable)"
+    who = "the bot's owner" if owner else "a guest (not the owner; reminders, server and main-memory tools are unavailable)"
     return (
-        "You are a helpful personal AI assistant living in Discord. "
-        f"Current time: {now}. You are talking with {who}. "
-        "Messages from guests are prefixed with [name]. "
+        "You are an AI assistant living in Discord, owned by one person.\n"
+        f"# Persona\n{await memory.get_persona()}\n\n"
+        f"Current time: {now}. You are talking with {who}. Messages from guests are prefixed with [name]. "
         "Reply in the user's language, concisely, using Discord markdown. "
         "Use tools when they help: web search for anything recent or factual, fetch_url for links, "
-        "get_weather, convert_currency, reminders. Cite sources briefly when you searched."
+        "get_weather, convert_currency, reminders. Cite sources briefly when you searched.\n"
+        "You have long-term memory below. When you learn something lasting about the person "
+        "(preferences, background, ongoing plans), save it quietly with remember_user"
+        + (" (or remember_main for things useful in every conversation)" if owner else "")
+        + "; fix stale facts with update_memory and drop wrong ones with forget_memory. "
+        "Don't announce routine saves. Never save secrets like passwords or tokens. "
+        "Guests never see the owner's personal memories; don't reveal private details about the owner to them.\n\n"
+        + await memory.context(user_id, user_name, owner)
     )
 
 
@@ -69,6 +76,7 @@ class AI(commands.Cog):
 
     async def cog_load(self) -> None:
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300))
+        await memory.init()
         async with aiosqlite.connect(DB) as db:
             await db.execute(
                 "CREATE TABLE IF NOT EXISTS ai_history (channel_id INTEGER, ts REAL, role TEXT, content TEXT)"
@@ -103,11 +111,12 @@ class AI(commands.Cog):
             await db.commit()
 
     # --- 응답 생성: 도구 호출을 반복하며, 스트리밍으로 1초마다 메시지 수정 ---
-    async def answer(self, send, edit, messages: list[dict], user_id: int, head: str = ""):
+    async def answer(self, send, edit, messages: list[dict], user_id: int, user_name: str, head: str = ""):
         """-> (답변 텍스트, 마지막 메시지). head: 첫 메시지 위에 붙일 줄"""
         owner = user_id == config.OWNER_ID
         items = ChatGPT.to_items(messages)
         tools = aitools.specs(owner)
+        system = await system_prompt(user_id, user_name, owner)
         text, status, msg, last = "", "", None, 0.0
 
         async def show(final: bool = False) -> None:
@@ -126,7 +135,7 @@ class AI(commands.Cog):
         for _ in range(MAX_TOOL_ROUNDS):
             calls = []
             async for kind, data in self.gpt.events(
-                self.http, self.model, system_prompt(owner), items, self.effort, tools
+                self.http, self.model, system, items, self.effort, tools
             ):
                 if kind == "text":
                     text += data
@@ -144,7 +153,7 @@ class AI(commands.Cog):
                 if not text:
                     status = aitools.LABELS.get(c["name"], "🔧 작업 중")
                     await show()
-                out = await aitools.run(self.http, c["name"], c.get("arguments"), user_id, owner)
+                out = await aitools.run(self.http, c["name"], c.get("arguments"), user_id, owner, user_name)
                 items.append({"type": "function_call_output", "call_id": c["call_id"], "output": out})
 
         parts = chunks(head + text)
@@ -176,7 +185,9 @@ class AI(commands.Cog):
             return await interaction.followup.send(t, wait=True)
 
         try:
-            reply, last = await self.answer(send, lambda m, t: m.edit(content=t), msgs, interaction.user.id, head)
+            reply, last = await self.answer(
+                send, lambda m, t: m.edit(content=t), msgs, interaction.user.id, interaction.user.display_name, head
+            )
         except (AuthError, RuntimeError, aiohttp.ClientError) as e:
             await interaction.edit_original_response(content=f"⚠️ {e}"[:1990])
             return
@@ -230,6 +241,39 @@ class AI(commands.Cog):
         status = "로그인됨" if self.gpt.logged_in else "로그인 안 됨"
         await interaction.response.send_message(f"모델 `{self.model}`, 추론 `{self.effort}` ({status})", ephemeral=True)
 
+    @ai.command(name="persona", description="AI 성격/말투 보기·바꾸기")
+    async def persona(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(PersonaModal(await memory.get_persona()))
+
+    @ai.command(name="memory", description="AI 기억 보기 (나만 보임)")
+    @app_commands.describe(user="이 사람에 대한 기억만 보기")
+    async def memory_cmd(self, interaction: discord.Interaction, user: discord.User | None = None) -> None:
+        if user:
+            rows = await memory.notes(memory.user_scope(user.id))
+            body = f"**{user.display_name}**\n" + ("\n".join(f"`{i}` {c}" for i, _, c in rows) or "없음")
+        else:
+            main = await memory.notes("main")
+            people = await memory.users()
+            body = "**메인 기억**\n" + ("\n".join(f"`{i}` {c}" for i, _, c in main) or "없음")
+            body += "\n\n**사람별 기억**\n" + (
+                "\n".join(f"{n or sc} ({cnt}개) <@{sc[5:]}>" for sc, n, cnt in people) or "없음"
+            )
+            body += "\n\n지우기: `/ai forget id` 또는 대화로 \"그거 잊어\""
+        await interaction.response.send_message(body[:2000], ephemeral=True)
+
+    @ai.command(name="forget", description="기억 지우기 (id, 또는 사람 지정 시 그 사람 기억 전부)")
+    async def forget_cmd(
+        self, interaction: discord.Interaction, id: int | None = None, user: discord.User | None = None
+    ) -> None:
+        if user:
+            await memory.clear(memory.user_scope(user.id))
+            msg = f"{user.display_name}에 대한 기억을 모두 지웠어요."
+        elif id is not None:
+            msg = "지웠어요." if await memory.delete(id) else "그런 기억이 없어요."
+        else:
+            msg = "id나 사람을 지정해 주세요."
+        await interaction.response.send_message(msg, ephemeral=True)
+
     # --- 봇 DM: 그냥 말 걸면 답장 ---
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -245,11 +289,27 @@ class AI(commands.Cog):
         msgs = await self.history(cid) + [{"role": "user", "content": content, "images": await to_data_urls(atts)}]
         try:
             async with message.channel.typing():
-                reply, _ = await self.answer(message.channel.send, lambda m, t: m.edit(content=t), msgs, message.author.id)
+                reply, _ = await self.answer(
+                    message.channel.send, lambda m, t: m.edit(content=t), msgs,
+                    message.author.id, message.author.display_name,
+                )
         except (AuthError, RuntimeError, aiohttp.ClientError) as e:
             await message.channel.send(f"⚠️ {e}"[:1990])
             return
         await self.remember(cid, content, reply)
+
+
+class PersonaModal(discord.ui.Modal, title="AI 페르소나"):
+    def __init__(self, current: str) -> None:
+        super().__init__()
+        self.text = discord.ui.TextInput(
+            label="성격, 말투, 이름, 규칙 등", style=discord.TextStyle.paragraph, default=current, max_length=4000
+        )
+        self.add_item(self.text)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await memory.set_persona(self.text.value or memory.DEFAULT_PERSONA)
+        await interaction.response.send_message("페르소나를 바꿨어요.", ephemeral=True)
 
 
 class AskModal(discord.ui.Modal, title="AI에게 묻기"):
