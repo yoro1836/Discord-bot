@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import aitools, config, curator, memory
+from .. import aitools, config, curator, memory, todos
 from ..chatgpt import AuthError, ChatGPT
 
 DB = config.DATA_DIR / "bot.db"
@@ -81,6 +81,7 @@ class AI(commands.Cog):
     async def cog_load(self) -> None:
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300))
         await memory.init()
+        await todos.init()
         async with aiosqlite.connect(DB) as db:
             await db.execute(
                 "CREATE TABLE IF NOT EXISTS ai_history (channel_id INTEGER, ts REAL, role TEXT, content TEXT)"
@@ -136,6 +137,15 @@ class AI(commands.Cog):
             else:
                 await edit(msg, body[:2000])
 
+        async def confirm(cmd: str, reason: str) -> bool:
+            view = ConfirmView()
+            note = f"\n{reason}" if reason else ""
+            m = await send(f"💻 이 명령을 실행할까요?{note}\n```sh\n{cmd[:1500]}\n```", view=view)
+            await view.wait()
+            done = "✅ 실행했어요" if view.ok else "❌ 취소했어요"
+            await m.edit(content=f"{done}\n```sh\n{cmd[:1500]}\n```", view=None)
+            return bool(view.ok)
+
         for _ in range(MAX_TOOL_ROUNDS):
             calls = []
             async for kind, data in self.gpt.events(
@@ -157,7 +167,9 @@ class AI(commands.Cog):
                 if not text:
                     status = aitools.LABELS.get(c["name"], "🔧 작업 중")
                     await show()
-                out = await aitools.run(self.http, c["name"], c.get("arguments"), user_id, owner, user_name)
+                out = await aitools.run(
+                    self.http, c["name"], c.get("arguments"), user_id, owner, user_name, confirm
+                )
                 items.append({"type": "function_call_output", "call_id": c["call_id"], "output": out})
 
         parts = chunks(head + text)
@@ -181,12 +193,13 @@ class AI(commands.Cog):
         msgs = await self.history(cid) + [{"role": "user", "content": prompt, "images": urls}]
         first = True
 
-        async def send(t: str):
+        async def send(t: str, view: discord.ui.View | None = None):
             nonlocal first
+            kw = {"view": view} if view else {}
             if first:
                 first = False
-                return await interaction.edit_original_response(content=t)
-            return await interaction.followup.send(t, wait=True)
+                return await interaction.edit_original_response(content=t, **kw)
+            return await interaction.followup.send(t, wait=True, **kw)
 
         try:
             reply, last = await self.answer(
@@ -315,6 +328,30 @@ class AI(commands.Cog):
             return
         await self.remember(cid, content, reply)
         self.curator.note(message.author.id, message.author.display_name, content, reply)
+
+
+class ConfirmView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=300)
+        self.ok: bool | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == config.OWNER_ID:
+            return True
+        await interaction.response.send_message("주인만 승인할 수 있어요.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="실행", style=discord.ButtonStyle.danger)
+    async def yes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.ok = True
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="취소", style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.ok = False
+        await interaction.response.defer()
+        self.stop()
 
 
 class PersonaModal(discord.ui.Modal, title="AI 페르소나"):

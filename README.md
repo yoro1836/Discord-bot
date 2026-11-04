@@ -11,7 +11,7 @@
 | 답변 밑 버튼 | `💬 이어서 질문`(다른 사람도 누를 수 있음), `🧹 새 대화`(나만) |
 | 남의 메시지 | 길게 누르기/우클릭 > 앱 > `AI에게 묻기` (요약·번역·링크·이미지) |
 
-예: `/c 내일 부산 비 와?`, `/c 100달러 원화로`, `/c 이거 요약 https://...`, `/c 6시에 빨래 알려줘`, `/c 서버 상태`
+예: `/c 내일 부산 비 와?`, `/c 100달러 원화로`, `/c 이거 요약 https://...`, `/c 6시에 빨래 알려줘`, `/c 서버 상태`, `/c 할 일에 장보기 넣어줘`, `/c 오늘 할 거 뭐 남았어?`, `/c 도커 로그 좀 봐줘`
 
 설정: `/ai login`, `/ai logout`, `/ai model [name] [effort]`, `/ai reset`(채널 기록 삭제)
 
@@ -43,6 +43,16 @@ Docker 없이: `python -m venv .venv && .venv/bin/pip install -r requirements.tx
 ## ChatGPT 연결
 API 키 대신 ChatGPT 구독을 쓴다. Codex CLI의 "Sign in with ChatGPT"와 같은 OAuth 디바이스 코드 흐름이라 사용량은 Codex 한도에서 차감된다. 토큰은 `data/chatgpt-auth.json`에 저장되고 자동 갱신된다. 비공식 사용이라 OpenAI가 막으면 멈출 수 있다.
 
+## 할 일 목록
+"할 일에 넣어줘", "그거 끝났어", "남은 거 뭐야" 처럼 말하면 AI가 추가/완료/수정/삭제한다 (주인 전용, `data/bot.db`).
+
+## 서버 명령 실행 (주인 전용)
+"디스크 뭐가 먹고 있어?", "봇 로그 봐줘" 하면 AI가 서버에서 명령을 돌린다. `ls`, `df`, `docker logs` 같은 읽기 전용 명령은 바로 실행하고, 그 외(`rm`, `docker restart`, 리다이렉트, `;` 연결, `sudo` 등)는 **실행/취소 버튼**을 띄워서 주인이 누른 뒤에만 실행한다. 5분 안에 안 누르면 취소.
+
+기본은 꺼져 있다(`AI_SHELL=off`). 켜는 법:
+- Docker에서 호스트 명령까지: `sudo docker compose -f compose.yaml -f compose.shell.yaml up -d --build` (컨테이너가 privileged + 호스트 PID로 돌고 `nsenter`로 호스트에서 root로 실행된다. 봇 토큰이 털리면 서버도 털린다는 뜻이니 주의)
+- systemd로 직접 돌릴 때: `.env`에 `AI_SHELL=local` (서비스 사용자 권한)
+
 ## 서버 감시
 1분마다 메모리, 디스크, load를 확인해서 `.env`의 `ALERT_*` 임계값을 넘으면 DM을 보낸다.
 
@@ -51,5 +61,6 @@ API 키 대신 ChatGPT 구독을 쓴다. Codex CLI의 "Sign in with ChatGPT"와 
 - `bot/aitools.py`: AI가 쓰는 도구 (날씨 Open-Meteo, 환율 open.er-api, 링크/유튜브, 리마인더, 서버 상태). 도구 추가는 여기에
 - `bot/memory.py`: 페르소나, 메인/사람별 기억 (SQLite)
 - `bot/curator.py`: 대화 후 백그라운드 기억 정리
+- `bot/shell.py`, `bot/todos.py`: 명령 실행(안전 판정), 할 일 목록
 - `bot/cogs/ai.py`: `/c`, 버튼, DM, 우클릭 메뉴, `/ai` 설정
 - `bot/cogs/reminders.py`, `bot/cogs/monitor.py`: 리마인더 발송, 서버 감시

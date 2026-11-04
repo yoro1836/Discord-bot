@@ -1,0 +1,8 @@
+# 서버 명령 실행(AI_SHELL=host)용 추가 설정. 봇이 호스트 전체를 root로 다룰 수 있게 됨.
+#   sudo docker compose -f compose.yaml -f compose.shell.yaml up -d --build
+services:
+  bot:
+    pid: host
+    privileged: true
+    environment:
+      AI_SHELL: host

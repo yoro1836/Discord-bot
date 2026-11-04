@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
-from . import memory, sysinfo, webtext
+from . import memory, shell, sysinfo, todos, webtext
 from .cogs import reminders
 
 TZ = ZoneInfo("Asia/Seoul")
@@ -56,11 +56,29 @@ OWNER_ONLY = [
     fn("list_reminders", "List the owner's scheduled reminders.", {}),
     fn("delete_reminder", "Delete a reminder by id.", {"id": {"type": "integer"}}),
     fn("server_status", "Memory/disk/load of the server this bot runs on.", {}),
+    fn("add_todo", "Add an item to the owner's to-do list.",
+       {"text": {"type": "string"}, "due": {"type": "string", "description": "optional date/time, e.g. 2026-11-05 or 2026-11-05T18:00"}},
+       ["text"]),
+    fn("list_todos", "List the owner's to-do items (open ones unless include_done).",
+       {"include_done": {"type": "boolean"}}, []),
+    fn("update_todo", "Mark a to-do done/undone, or change its text or due.",
+       {"id": {"type": "integer"}, "done": {"type": "boolean"}, "text": {"type": "string"}, "due": {"type": "string"}},
+       ["id"]),
+    fn("delete_todo", "Delete a to-do item.", {"id": {"type": "integer"}}),
 ]
+SHELL_TOOL = fn(
+    "run_command",
+    "Run a shell command on the owner's Linux server (Ubuntu on Oracle Cloud; the bot runs there in Docker). "
+    "Read-only commands run immediately; anything that changes state asks the owner to approve first. "
+    "Prefer non-interactive flags (e.g. top -bn1, --no-pager). Output is truncated to ~8KB.",
+    {"command": {"type": "string"}, "reason": {"type": "string", "description": "one short line shown to the owner"}},
+)
 
 
 def specs(owner: bool) -> list[dict]:
-    return [WEB_SEARCH, *PUBLIC, *(OWNER_ONLY if owner else [])]
+    if not owner:
+        return [WEB_SEARCH, *PUBLIC]
+    return [WEB_SEARCH, *PUBLIC, *OWNER_ONLY, *([SHELL_TOOL] if shell.MODE != "off" else [])]
 
 
 LABELS = {
@@ -68,7 +86,8 @@ LABELS = {
     "forget_memory": "🧠 잊는 중",
     "get_weather": "🌤️ 날씨 확인", "convert_currency": "💱 환율 확인", "fetch_url": "🔗 링크 읽는 중",
     "set_reminder": "⏰ 리마인더 설정", "list_reminders": "⏰ 리마인더 확인", "delete_reminder": "⏰ 리마인더 삭제",
-    "server_status": "🖥️ 서버 상태 확인",
+    "server_status": "🖥️ 서버 상태 확인", "run_command": "💻 명령 실행 중",
+    "add_todo": "📝 할 일 추가", "list_todos": "📝 할 일 확인", "update_todo": "📝 할 일 수정", "delete_todo": "📝 할 일 삭제",
 }
 
 
@@ -126,8 +145,10 @@ async def fetch_url(s, url: str) -> dict:
 
 
 async def run(
-    s: aiohttp.ClientSession, name: str, args_json: str, user_id: int, owner: bool, user_name: str = ""
+    s: aiohttp.ClientSession, name: str, args_json: str, user_id: int, owner: bool, user_name: str = "",
+    confirm=None,
 ) -> str:
+    """confirm: async (command, reason) -> bool, 확인 버튼을 띄우는 함수"""
     # 주인은 모든 기억을, 손님은 자기 기억만 고치거나 지울 수 있음
     scopes = None if owner else [memory.user_scope(user_id)]
     try:
@@ -164,6 +185,25 @@ async def run(
             out = {"deleted": await reminders.delete(user_id, int(a["id"]))}
         elif name == "server_status":
             out = {"summary": sysinfo.summary()}
+        elif name == "add_todo":
+            out = {"id": await todos.add(user_id, a["text"], a.get("due"))}
+        elif name == "list_todos":
+            out = await todos.list_for(user_id, bool(a.get("include_done")))
+        elif name == "update_todo":
+            tid, ok = int(a["id"]), False
+            if "done" in a:
+                ok = await todos.set_done(user_id, tid, bool(a["done"]))
+            if a.get("text") or a.get("due"):
+                ok = await todos.edit(user_id, tid, a.get("text"), a.get("due")) or ok
+            out = {"updated": ok}
+        elif name == "delete_todo":
+            out = {"deleted": await todos.delete(user_id, int(a["id"]))}
+        elif name == "run_command" and shell.MODE != "off":
+            cmd = a["command"]
+            if shell.needs_confirm(cmd) and not (confirm and await confirm(cmd, a.get("reason", ""))):
+                out = {"error": "the owner declined (or didn't answer); don't retry the same command"}
+            else:
+                out = await shell.run(cmd)
         else:
             out = {"error": f"unknown tool {name}"}
     except Exception as e:  # noqa: BLE001
