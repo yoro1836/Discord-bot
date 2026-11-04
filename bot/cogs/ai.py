@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .. import aitools, config, memory
+from .. import aitools, config, curator, memory
 from ..chatgpt import AuthError, ChatGPT
 
 DB = config.DATA_DIR / "bot.db"
@@ -33,10 +33,10 @@ async def system_prompt(user_id: int, user_name: str, owner: bool) -> str:
         "Reply in the user's language, concisely, using Discord markdown. "
         "Use tools when they help: web search for anything recent or factual, fetch_url for links, "
         "get_weather, convert_currency, reminders. Cite sources briefly when you searched.\n"
-        "You have long-term memory below. When you learn something lasting about the person "
-        "(preferences, background, ongoing plans), save it quietly with remember_user"
-        + (" (or remember_main for things useful in every conversation)" if owner else "")
-        + "; fix stale facts with update_memory and drop wrong ones with forget_memory. "
+        "You have long-term memory below; use it naturally. A background process updates memory after "
+        "conversations, so only call memory tools when explicitly asked (remember this / forget that / "
+        "that's wrong): remember_user" + (" or remember_main" if owner else "")
+        + ", update_memory, forget_memory. "
         "Don't announce routine saves. Never save secrets like passwords or tokens. "
         "Guests never see the owner's personal memories; don't reveal private details about the owner to them.\n\n"
         + await memory.context(user_id, user_name, owner)
@@ -73,6 +73,7 @@ class AI(commands.Cog):
         self.model = os.environ.get("AI_MODEL", "gpt-6.1-sol")
         self.effort = os.environ.get("AI_EFFORT", "low")
         self.http: aiohttp.ClientSession | None = None
+        self.curator = curator.Curator(self.gpt, lambda: self.http, lambda: self.model)
 
     async def cog_load(self) -> None:
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300))
@@ -192,6 +193,7 @@ class AI(commands.Cog):
             await interaction.edit_original_response(content=f"⚠️ {e}"[:1990])
             return
         await self.remember(cid, prompt, reply)
+        self.curator.note(interaction.user.id, interaction.user.display_name, prompt, reply)
         # 답변 밑 버튼: 명령어 다시 칠 필요 없이 이어서 질문
         await last.edit(view=ChatButtons())
 
@@ -261,6 +263,18 @@ class AI(commands.Cog):
             body += "\n\n지우기: `/ai forget id` 또는 대화로 \"그거 잊어\""
         await interaction.response.send_message(body[:2000], ephemeral=True)
 
+    @ai.command(name="tidy", description="지금 바로 기억 정리 (중복 합치기, 오래된 것 정리)")
+    @app_commands.describe(user="이 사람 기억 정리 (기본: 나)")
+    async def tidy(self, interaction: discord.Interaction, user: discord.User | None = None) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        u = user or interaction.user
+        try:
+            n = await self.curator.run(u.id, u.display_name, ["(No new conversation. Just tidy: merge duplicates, fix contradictions.)"])
+        except (AuthError, RuntimeError, aiohttp.ClientError) as e:
+            await interaction.followup.send(f"⚠️ {e}"[:1990], ephemeral=True)
+            return
+        await interaction.followup.send(f"정리 끝 ({n}건 변경). `/ai memory`로 확인", ephemeral=True)
+
     @ai.command(name="forget", description="기억 지우기 (id, 또는 사람 지정 시 그 사람 기억 전부)")
     async def forget_cmd(
         self, interaction: discord.Interaction, id: int | None = None, user: discord.User | None = None
@@ -297,6 +311,7 @@ class AI(commands.Cog):
             await message.channel.send(f"⚠️ {e}"[:1990])
             return
         await self.remember(cid, content, reply)
+        self.curator.note(message.author.id, message.author.display_name, content, reply)
 
 
 class PersonaModal(discord.ui.Modal, title="AI 페르소나"):
