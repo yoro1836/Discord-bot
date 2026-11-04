@@ -1,0 +1,20 @@
+# Docker 없이 돌릴 때: /opt/discord-bot 에 두고 venv 만든 뒤
+#   sudo cp deploy/discord-bot.service /etc/systemd/system/
+#   sudo systemctl enable --now discord-bot
+[Unit]
+Description=Personal Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/discord-bot
+ExecStart=/opt/discord-bot/.venv/bin/python -m bot
+Restart=always
+RestartSec=5
+DynamicUser=yes
+StateDirectory=discord-bot
+Environment=DATA_DIR=/var/lib/discord-bot
+EnvironmentFile=/opt/discord-bot/.env
+
+[Install]
+WantedBy=multi-user.target
