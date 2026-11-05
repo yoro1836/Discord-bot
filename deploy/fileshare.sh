@@ -5,6 +5,11 @@
 # 헤츠너 방화벽에서 TCP 80, 443 인바운드를 열어야 함 (80은 인증서 발급용)
 set -euo pipefail
 
+# 데비안 13은 docker CLI가 docker-cli 패키지로 따로 나옴
+command -v docker >/dev/null || apt-get install -y docker-cli
+# compose 플러그인이 없으면 docker-compose 명령으로 대신
+if docker compose version >/dev/null 2>&1; then compose() { docker compose "$@"; }; else compose() { docker-compose "$@"; }; fi
+
 ip=$(curl -fsS4 https://ifconfig.me)
 domain=${1:-${ip//./-}.sslip.io}
 dir=/opt/fileshare
@@ -82,7 +87,7 @@ volumes:
   caddy_config:
 YAML
 
-docker compose up -d
+compose up -d
 echo
 echo "접속: https://$domain  (처음 접속해서 관리자 계정 만들기)"
 echo "인증서 발급에 1분쯤 걸릴 수 있음. 로그: cd $dir && docker compose logs -f"

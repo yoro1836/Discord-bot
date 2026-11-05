@@ -16,7 +16,7 @@ base() {
     fi
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
-    DEBIAN_FRONTEND=noninteractive apt-get -y install docker.io git curl jq ufw sudo \
+    DEBIAN_FRONTEND=noninteractive apt-get -y install docker.io docker-cli git curl jq ufw sudo \
         unattended-upgrades build-essential unzip
     # compose v2 패키지 이름이 우분투(docker-compose-v2)와 데비안(docker-compose)에서 다름
     DEBIAN_FRONTEND=noninteractive apt-get -y install docker-compose-v2 2>/dev/null \
